@@ -1,0 +1,18 @@
+[package]
+name = "local-haunt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui-kit = "0.6"
+gpui-tray = { version = "0.1.4", default-features = false, features = ["gpui-kit"] }
+
+[patch.crates-io]
+gpui-tray = { path = "vendor/gpui-tray" }
+
+[dev-dependencies]
+gpui-kit = { version = "0.6", features = ["test-support"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder"] }

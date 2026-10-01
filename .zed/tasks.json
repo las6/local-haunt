@@ -1,0 +1,18 @@
+[
+  {
+    "label": "Local Haunt: build and run macOS app",
+    "command": "bash",
+    "args": ["scripts/package-macos.sh", "--debug", "--run"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "all",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "Local Haunt: package release app",
+    "command": "bash",
+    "args": ["scripts/package-macos.sh"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "save": "all"
+  }
+]
