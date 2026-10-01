@@ -111,6 +111,9 @@ pub struct PortList {
     transition_task: Option<Task<()>>,
     control_task: Option<Task<()>>,
     owner_task: Option<Task<()>>,
+    update_task: Option<Task<()>>,
+    checking_updates: bool,
+    update_result: Option<Result<crate::updates::Update, String>>,
     stopping: bool,
     confirmation: Option<(Vec<Listener>, bool)>,
     added: BTreeSet<(u32, u16)>,
@@ -202,6 +205,24 @@ impl PortList {
             }));
         }
         view
+    }
+
+    pub fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.checking_updates {
+            return;
+        }
+        self.checking_updates = true;
+        self.update_result = None;
+        let task = cx.background_spawn(async { crate::updates::check() });
+        self.update_task = Some(cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.checking_updates = false;
+                view.update_result = Some(result);
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn save_settings(&mut self) {
@@ -1167,6 +1188,66 @@ impl Render for PortList {
                                 .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                         ),
                 );
+        }
+        if self.checking_updates || self.update_result.is_some() {
+            use crate::updates::Update;
+            let message = match &self.update_result {
+                None => "Checking for updates…".to_owned(),
+                Some(Ok(Update::Current)) => {
+                    format!("Local Haunt {} is up to date.", env!("CARGO_PKG_VERSION"))
+                }
+                Some(Ok(Update::Available { version, .. })) => {
+                    format!("Local Haunt {version} is available.")
+                }
+                Some(Ok(Update::NoRelease)) => "No published releases yet.".to_owned(),
+                Some(Err(error)) => error.clone(),
+            };
+            let mut notice = div()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .flex_shrink_0()
+                .border_t_1()
+                .border_color(colors.border)
+                .text_size(px(metrics.small))
+                .text_color(colors.secondary)
+                .child(div().flex_1().child(message));
+            if let Some(Ok(Update::Available { url, .. })) = &self.update_result {
+                let url = url.clone();
+                notice = notice.child(
+                    div()
+                        .id("open-release")
+                        .cursor_pointer()
+                        .text_color(colors.accent)
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .child("Open release page ↗"),
+                );
+            }
+            if matches!(self.update_result, Some(Err(_))) {
+                notice = notice.child(
+                    div()
+                        .id("retry-update")
+                        .cursor_pointer()
+                        .text_color(colors.accent)
+                        .on_click(cx.listener(|view, _, _, cx| view.check_updates(cx)))
+                        .child("Retry"),
+                );
+            }
+            if !self.checking_updates {
+                notice = notice.child(
+                    div()
+                        .id("dismiss-update")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.update_result = None;
+                            cx.notify();
+                        }))
+                        .child("Dismiss"),
+                );
+            }
+            root = root.child(notice);
         }
         if let Some(error) = &self.control_error {
             root = root.child(

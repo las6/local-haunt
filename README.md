@@ -21,8 +21,19 @@ Created by **[las6](https://las6.net)**. Built with Rust, GPUI Kit, and gpui-tra
 - Cmd/Ctrl +, −, and 0 to enlarge, reduce, or reset text size.
 - Persistent project folders, zoom, and Auto refresh preferences.
 - Native About panel with version, author credit, and website link; it opens independently of the port window.
+- Manual **Check for Updates…** from the app or ghost menu, with a link to newer GitHub releases.
 
 The app stays in the menu bar when its window is closed. Opening the window brings it into the Dock and Cmd+Tab; closing the last window returns it to menu bar mode. Use the ghost menu or Cmd+Q to quit.
+
+## Download and install
+
+Download the Apple Silicon ZIP from [GitHub Releases](https://github.com/las6/local-haunt/releases/latest). Requires an Apple Silicon Mac running macOS 15 or newer; Intel Macs are not supported by these downloads. No Rust installation is needed.
+
+Unzip the download and drag **Local Haunt.app** into **Applications**. Open it, then use the ghost in the menu bar.
+
+These releases are ad-hoc signed, without an Apple Developer ID or notarization. macOS may block the first launch. If you trust this download, try opening it once, then go to **System Settings → Privacy & Security → Open Anyway** and confirm. See [Apple's instructions](https://support.apple.com/102445).
+
+Choose **Check for Updates…** from the app menu or ghost menu to check GitHub's latest stable release. Checks run only when requested, require no GitHub login, and do not download or install anything. If a newer Apple Silicon download is available, **Open release page** opens it in your browser. Download the ZIP, quit Local Haunt, and replace the app in Applications. Settings remain in Application Support and survive replacement. Network errors can be retried; drafts and prereleases are excluded.
 
 ## Run and package
 
@@ -36,6 +47,9 @@ bash scripts/package-macos.sh --debug --run
 
 # Optimized release app bundle.
 bash scripts/package-macos.sh
+
+# Apple Silicon ZIP and SHA-256 checksum for a GitHub release.
+bash scripts/package-release.sh
 ```
 
 In Zed, use **Local Haunt: build and run macOS app** or **Local Haunt: package release app**. Rerunning cancels the previous Zed task. After successful packaging, `--run` also stops any remaining instances using the exact executable path for this checkout and profile, waits up to five seconds for them to exit, then launches the new build. Installed releases and other checkouts are left alone. If an instance will not exit, the script reports an error instead of launching another copy.
@@ -45,7 +59,7 @@ The bundles are generated at:
 - `target/app/debug/Local Haunt.app`
 - `target/app/release/Local Haunt.app`
 
-Plain `cargo run` works for development but does not load the packaged app's name, Dock icon, or About credits. `cargo build --release` produces an optimized executable; the packaging script creates the macOS `.app`, generates its icon, sets its version from Cargo, and ad-hoc signs it. Public distribution would need separate Developer ID signing and notarization.
+Plain `cargo run` works for development but does not load the packaged app's name, Dock icon, or About credits. `cargo build --release` produces an optimized executable; the packaging script creates the macOS `.app`, generates its icon, sets its version from Cargo, and ad-hoc signs it. The GitHub downloads use this ad-hoc signature and require the first-launch approval described above. Developer ID signing and notarization can be added later.
 
 ## Settings
 
@@ -76,6 +90,7 @@ HTTP assumes `http://localhost:port`; databases and other services may not serve
 - `src/main.rs`: app lifecycle, menus, window creation, and packaging commands.
 - `src/port_list.rs`: table, Settings view, polling, transitions, and process controls.
 - `src/ports.rs`: macOS `lsof` queries, project/app classification, and signalling.
+- `src/updates.rs`: on-demand GitHub release discovery and version comparison.
 - `src/settings.rs`: preference validation, loading, and atomic file replacement.
 - `src/theme.rs`: semantic colors, font, dimensions, zoom, and timing.
 - `src/macos.rs`: Dock activation policy and the native About panel.
@@ -94,10 +109,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Tests cover socket discovery, parsing, path classification, worker grouping, settings persistence, view navigation, refresh transitions, and SIGTERM/SIGKILL against test-owned child processes.
+Tests cover release-version comparison, GitHub response failures, socket discovery, parsing, path classification, worker grouping, settings persistence, view navigation, refresh transitions, and SIGTERM/SIGKILL against test-owned child processes.
 
 `vendor/gpui-tray` contains version 0.1.4 with two macOS fixes: an 18-point logical menu bar icon size, and clearing native menu tracking/highlight before replacing a menu. See `vendor/gpui-tray/LOCAL_PATCH.md` for maintenance notes. Cargo selects it with `[patch.crates-io]`.
 
 The existing `block v0.1.6` future-compiler notice comes from GPUI's dependency chain.
 
 References: [GPUI Kit](https://gpui-kit.com/docs/getting-started/), [gpui-tray](https://docs.rs/gpui-tray/0.1.4/gpui_tray/).
+
+## Publishing a release
+
+Bump the version in Cargo and `assets/Info.plist`, update the lockfile, and run the development checks. Build with `bash scripts/package-release.sh` on an Apple Silicon Mac. It verifies the binary architecture and signature, then writes the ZIP and checksum to `target/releases/`. Commit and push the source before creating a release tagged `v<version>` at that commit. Attach both files, include the Apple Silicon/macOS requirements and unsigned-app installation notes, and publish as a stable release. This makes it discoverable by the manual update check.

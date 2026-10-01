@@ -6,7 +6,7 @@ use std::time::Duration;
 // pub const ACCENT: u32 = 0x7259db;
 pub const ACCENT: u32 = 0xf7920c;
 // Dark tint over the native macOS blur; lower values reveal more of the backdrop.
-pub const WINDOW_TINT_OPACITY: f32 = 0.75;
+pub const WINDOW_TINT_OPACITY: f32 = 0.8;
 // Extra tint for controls and panels over the window; keeps text and icons fully opaque.
 pub const ELEMENT_TINT_OPACITY: f32 = 0.35;
 pub const FONT_FAMILY: &str = ".SystemUIFont";

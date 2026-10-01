@@ -5,6 +5,7 @@ mod icon_export;
 mod macos;
 mod settings;
 mod theme;
+mod updates;
 
 mod port_list;
 mod ports;
@@ -12,7 +13,7 @@ mod ports;
 use port_list::PortList;
 
 // Actions are named commands that our native menu can dispatch.
-actions!(local_haunt, [OpenPorts, About, Quit]);
+actions!(local_haunt, [OpenPorts, About, CheckForUpdates, Quit]);
 
 // Keeping the handle here keeps the native menu bar item alive.
 struct MenuBar(Tray);
@@ -52,10 +53,14 @@ fn main() {
             }
         })
         .detach();
-        cx.on_action(open_ports).on_action(about).on_action(quit);
+        cx.on_action(open_ports)
+            .on_action(about)
+            .on_action(check_for_updates)
+            .on_action(quit);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![Menu::new("Local Haunt").items([
             MenuItem::action("About Local Haunt", About),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Settings…", port_list::OpenSettings),
             MenuItem::separator(),
@@ -72,6 +77,7 @@ fn main() {
                 vec![
                     MenuItem::action("Open Local Haunt", OpenPorts),
                     MenuItem::action("About Local Haunt", About),
+                    MenuItem::action("Check for Updates…", CheckForUpdates),
                     MenuItem::separator(),
                     MenuItem::action("Quit Local Haunt", Quit),
                 ]
@@ -88,6 +94,19 @@ fn open_ports(_: &OpenPorts, cx: &mut App) {
     // A menu action can run while its active window is already being updated.
     // Wait until action dispatch releases that window before touching it.
     cx.defer(show_ports);
+}
+
+fn check_for_updates(_: &CheckForUpdates, cx: &mut App) {
+    cx.defer(|cx| {
+        show_ports(cx);
+        if let Some(handle) = cx
+            .windows()
+            .first()
+            .and_then(|window| window.downcast::<PortList>())
+        {
+            let _ = handle.update(cx, |view, _, cx| view.check_updates(cx));
+        }
+    });
 }
 
 fn show_ports(cx: &mut App) {
