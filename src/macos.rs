@@ -12,10 +12,24 @@ pub fn set_window_presence(has_window: bool) {
     } else {
         NSApplicationActivationPolicy::Accessory
     };
-    if !app.setActivationPolicy(policy) {
+    if app.activationPolicy() != policy
+        && !app.setActivationPolicy(policy)
+        && app.activationPolicy() != policy
+    {
         eprintln!("macOS declined the application activation policy change");
     }
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
 pub fn set_window_presence(_: bool) {}
+
+#[cfg(all(target_os = "macos", not(test)))]
+pub fn show_about() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let main_thread = MainThreadMarker::new().expect("AppKit must run on the main thread");
+    NSApplication::sharedApplication(main_thread).orderFrontStandardAboutPanel(None);
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+pub fn show_about() {}

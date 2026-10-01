@@ -1,7 +1,11 @@
 [package]
 name = "local-haunt"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+authors = ["las6"]
+description = "A macOS menu bar utility for tracking local servers and their processes"
+homepage = "https://las6.net"
+repository = "https://github.com/las6/local-haunt"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

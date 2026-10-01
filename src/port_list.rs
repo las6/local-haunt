@@ -1,11 +1,23 @@
 use crate::ports::{self, Category, Group, Listener};
 use crate::settings::Settings;
 use crate::theme::{self, Metrics};
+use gpui_kit::component::Sizable;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-actions!(local_haunt, [ZoomIn, ZoomOut, ResetZoom]);
+actions!(
+    local_haunt,
+    [
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
+        OpenSettings,
+        BackToPorts,
+        FocusSearch
+    ]
+);
 
 // A server can have multiple workers listening on the same endpoint.
 // Keep every PID in the details, but show that endpoint once in the list.
@@ -41,6 +53,37 @@ fn grouped(listeners: &[Listener]) -> BTreeMap<Group, Vec<Endpoint<'_>>> {
         .collect()
 }
 
+// Filter endpoints, not individual workers: actions must keep all of their targets.
+fn filtered_groups<'a>(
+    listeners: &'a [Listener],
+    query: &str,
+    projects_only: bool,
+) -> BTreeMap<Group, Vec<Endpoint<'a>>> {
+    let query = query.trim().to_lowercase();
+    let query = query.strip_prefix(':').unwrap_or(&query);
+    let mut groups = grouped(listeners);
+    groups.retain(|group, endpoints| {
+        if projects_only && group.category != Category::Projects {
+            return false;
+        }
+        endpoints.retain(|endpoint| {
+            query.is_empty()
+                || group.label.to_lowercase().contains(query)
+                || endpoint.rows.iter().any(|row| {
+                    row.port.to_string().contains(query)
+                        || row.pid.to_string().contains(query)
+                        || row.process.to_lowercase().contains(query)
+                        || row
+                            .project
+                            .as_ref()
+                            .is_some_and(|name| name.to_lowercase().contains(query))
+                })
+        });
+        !endpoints.is_empty()
+    });
+    groups
+}
+
 #[derive(Default)]
 pub struct PortList {
     listeners: Vec<Listener>,
@@ -52,6 +95,7 @@ pub struct PortList {
     expanded_groups: BTreeSet<String>,
     expanded_rows: BTreeSet<String>,
     projects_only: bool,
+    search: Option<Entity<InputState>>,
     project_roots: Vec<std::path::PathBuf>,
     settings_path: Option<std::path::PathBuf>,
     settings_valid: bool,
@@ -77,6 +121,8 @@ pub struct PortList {
 
 impl PortList {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Inputs and tooltips should use the same dark appearance as the port table.
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, Some(window), cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         cx.bind_keys([
@@ -84,17 +130,29 @@ impl PortList {
             KeyBinding::new("cmd-=", ZoomIn, Some("PortList")),
             KeyBinding::new("cmd--", ZoomOut, Some("PortList")),
             KeyBinding::new("cmd-0", ResetZoom, Some("PortList")),
+            KeyBinding::new("cmd-,", OpenSettings, Some("PortList")),
+            KeyBinding::new("cmd-f", FocusSearch, Some("PortList")),
+            KeyBinding::new("escape", BackToPorts, Some("PortList")),
             KeyBinding::new("ctrl-+", ZoomIn, Some("PortList")),
             KeyBinding::new("ctrl-=", ZoomIn, Some("PortList")),
             KeyBinding::new("ctrl--", ZoomOut, Some("PortList")),
             KeyBinding::new("ctrl-0", ResetZoom, Some("PortList")),
         ]);
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search ports, names, PIDs"));
+        cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         #[allow(unused_mut)]
         let mut view = Self {
             auto_refresh: true,
             settings_valid: true,
             active: window.is_window_active(),
             focus: Some(focus),
+            search: Some(search),
             ghost: Some(theme::ghost_image()),
             ..Self::default()
         };
@@ -311,6 +369,127 @@ fn cell(text: impl Into<SharedString>, width: f32) -> Div {
 }
 
 impl PortList {
+    fn settings_view(&self, cx: &mut Context<Self>) -> Div {
+        let colors = theme::palette();
+        let metrics = Metrics::at_zoom(self.zoom);
+        let mut content = div().id("settings-content").flex_1().min_h_0().overflow_y_scroll()
+            .flex().flex_col().p_4().gap_4()
+            .child(div().flex().items_center().justify_between()
+                .child(div().flex().flex_col().gap_1()
+                    .child("Automatic refresh")
+                    .child(div().text_size(px(metrics.small)).text_color(colors.secondary)
+                        .child(format!("Check every {} seconds while the window is active.", theme::REFRESH_INTERVAL.as_secs()))))
+                .child(div().id("auto-refresh").px_3().py_1().rounded_sm().cursor_pointer()
+                    .bg(if self.auto_refresh { colors.selected } else { colors.surface })
+                    .text_color(if self.auto_refresh { colors.accent } else { colors.secondary })
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.auto_refresh = !view.auto_refresh; view.save_settings();
+                        if view.auto_refresh { view.refresh(cx); } cx.notify();
+                    })).child(if self.auto_refresh { "On ✓" } else { "Off" })))
+            .child(div().flex().items_center().justify_between()
+                .child(div().flex().flex_col().gap_1().child("Text size")
+                    .child(div().text_size(px(metrics.small)).text_color(colors.secondary).child("Cmd/Ctrl + or − to resize; 0 to reset.")))
+                .child(div().text_color(colors.secondary).child(format!("{} px", metrics.text))))
+            .child(div().h(px(1.0)).bg(colors.border).flex_shrink_0())
+            .child(div().flex().items_center().justify_between().child("Project folders")
+                .child(div().id("add-folders").px_2().py_1().rounded_sm().cursor_pointer()
+                    .text_color(colors.accent).hover(|s| s.bg(colors.button_hover))
+                    .on_click(cx.listener(|view, _, _, cx| view.add_folders(cx))).child("Add folders…")))
+            .child(div().text_size(px(metrics.small)).text_color(colors.secondary)
+                .child("Listeners running inside these folders appear under Your Projects. Changes save automatically."));
+        if self.project_roots.is_empty() {
+            content = content.child(
+                div()
+                    .text_color(colors.muted)
+                    .child("No project folders yet."),
+            );
+        }
+        for (index, root) in self.project_roots.iter().enumerate() {
+            let path = root.clone();
+            content = content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_sm()
+                    .bg(colors.surface)
+                    .child(div().flex_1().min_w_0().child(root.display().to_string()))
+                    .child(
+                        div()
+                            .id(("remove-root", index))
+                            .px_2()
+                            .py_1()
+                            .cursor_pointer()
+                            .text_color(colors.secondary)
+                            .hover(|s| s.text_color(colors.danger))
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.project_roots.retain(|root| root != &path);
+                                view.save_settings();
+                                view.refresh(cx);
+                                cx.notify();
+                            }))
+                            .child("Remove"),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .pl(px(metrics.traffic_lights_inset))
+                    .pr_3()
+                    .h(px(metrics.header))
+                    .flex_shrink_0()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .id("back-to-ports")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_color(colors.accent)
+                            .hover(|s| s.bg(colors.button_hover))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.settings_open = false;
+                                cx.notify();
+                            }))
+                            .child("← Ports"),
+                    )
+                    .child("Settings"),
+            )
+            .child(content)
+            .child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .flex_shrink_0()
+                    .text_size(px(metrics.small))
+                    .text_color(colors.secondary)
+                    .child(
+                        div()
+                            .id("settings-about")
+                            .cursor_pointer()
+                            .on_click(|_, _, cx| cx.dispatch_action(&crate::About))
+                            .child(format!(
+                                "About Local Haunt · v{}",
+                                env!("CARGO_PKG_VERSION")
+                            )),
+                    ),
+            )
+    }
+
     fn endpoint_row(
         &self,
         group: &Group,
@@ -369,9 +548,9 @@ impl PortList {
             .px_3()
             .gap_2()
             .bg(if number.is_multiple_of(2) {
-                colors.surface
+                colors.row_alternate
             } else {
-                colors.background
+                colors.row_background
             })
             .hover(|s| s.bg(colors.row_hover))
             // Leaf rows have no hierarchy arrow; click the row or details action for metadata.
@@ -473,12 +652,6 @@ impl PortList {
                 .into_iter()
                 .collect::<Vec<_>>()
                 .join(", ");
-            let reason = match group.category {
-                Category::Projects => "Project working directory",
-                Category::Apps if group.key == "local" => "Local app/service path",
-                Category::Apps => "Application or system executable path",
-                Category::Unknown => "No matching project or application path",
-            };
             let mut details = div()
                 .ml(px(if nested {
                     metrics.nested_details_inset
@@ -490,35 +663,73 @@ impl PortList {
                 .py_2()
                 .mb_1()
                 .bg(colors.surface)
-                .border_l_1()
-                .border_color(colors.accent)
                 .flex()
                 .flex_col()
-                .gap_1()
-                .text_size(px(metrics.small))
-                .text_color(colors.secondary);
-            for text in [
-                format!("PID  {pids}  ·  {addresses}"),
-                format!(
-                    "Working directory  {}",
-                    row.directory
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "unavailable".into())
+                .gap_2()
+                .text_size(px(metrics.small));
+            let fields = [
+                ("Process", Some(format!("{} · PID {pids}", row.process))),
+                ("Listening", Some(addresses)),
+                (
+                    "Directory",
+                    row.directory.as_ref().map(|p| p.display().to_string()),
                 ),
-                format!(
-                    "Executable  {}",
-                    row.executable
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "unavailable".into())
+                (
+                    "Executable",
+                    row.executable.as_ref().map(|p| p.display().to_string()),
                 ),
-                format!("Identified by  {reason}"),
-            ] {
-                details = details.child(div().child(text));
+            ];
+            for (label, value) in fields {
+                let Some(value) = value else { continue };
+                if value.is_empty() {
+                    continue;
+                }
+                let copy_value = value.clone();
+                let tooltip_value = value.clone();
+                details = details.child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .w(px(74.0 + f32::from(self.zoom) * 4.0))
+                                .flex_shrink_0()
+                                .text_color(colors.muted)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "detail-{label}-{port}-{}",
+                                    row.pid
+                                )))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(colors.secondary)
+                                .cursor_pointer()
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(format!(
+                                        "{tooltip_value}\nClick to copy"
+                                    ))
+                                    .build(window, cx)
+                                })
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_value.clone(),
+                                    ))
+                                })
+                                .child(value),
+                        ),
+                );
             }
             let mut controls = div()
                 .flex()
+                .items_center()
+                .pt_2()
+                .border_t_1()
+                .border_color(colors.border)
                 .gap_3()
                 .child(
                     div()
@@ -535,6 +746,7 @@ impl PortList {
                         })
                         .child("Copy URL"),
                 )
+                .child(div().flex_1())
                 .child(
                     div()
                         .id(SharedString::from(format!("force-{port}-{}", row.pid)))
@@ -605,7 +817,13 @@ impl Render for PortList {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::palette();
         let metrics = Metrics::at_zoom(self.zoom);
-        let groups = grouped(&self.listeners);
+        let query = self
+            .search
+            .as_ref()
+            .map(|search| search.read(cx).value().to_string())
+            .unwrap_or_default();
+        let searching = !query.trim().is_empty();
+        let groups = filtered_groups(&self.listeners, &query, self.projects_only);
         let project_count = groups
             .keys()
             .filter(|g| g.category == Category::Projects)
@@ -623,13 +841,18 @@ impl Render for PortList {
             list = list.child(div().p_3().text_color(colors.error).child(error.clone()));
         }
         if !self.scanning && (groups.is_empty() || (self.projects_only && project_count == 0)) {
-            list = list.child(div().p_3().text_color(colors.secondary).child(
-                if self.projects_only {
-                    "No listeners found in your project folders. Check All for other services."
-                } else {
-                    "No listening TCP ports found."
-                },
-            ));
+            list = list.child(
+                div()
+                    .p_3()
+                    .text_color(colors.secondary)
+                    .child(if searching {
+                        "No matching ports. Try another search or clear the field."
+                    } else if self.projects_only {
+                        "No listeners found in your project folders. Check All for other services."
+                    } else {
+                        "No listening TCP ports found."
+                    }),
+            );
         }
         let mut last_category = None;
         let mut row_number: usize = 0;
@@ -657,7 +880,7 @@ impl Render for PortList {
             }
             let is_group = has_children(group, endpoints.len());
             if is_group {
-                let open = self.expanded_groups.contains(&group.key);
+                let open = searching || self.expanded_groups.contains(&group.key);
                 let key = group.key.clone();
                 let unique_ports = endpoints
                     .iter()
@@ -679,9 +902,9 @@ impl Render for PortList {
                         .px_3()
                         .gap_2()
                         .bg(if row_number.is_multiple_of(2) {
-                            colors.surface
+                            colors.row_alternate
                         } else {
-                            colors.background
+                            colors.row_background
                         })
                         .cursor_pointer()
                         .hover(|s| s.bg(colors.row_hover))
@@ -733,7 +956,7 @@ impl Render for PortList {
                     .bg(if self.projects_only == projects_only {
                         colors.selected
                     } else {
-                        colors.background
+                        colors.surface
                     })
                     .text_color(if self.projects_only == projects_only {
                         colors.accent
@@ -748,99 +971,202 @@ impl Render for PortList {
                     .child(label),
             );
         }
-        let mut root = div().key_context("PortList").track_focus(self.focus.as_ref().expect("view focus"))
-            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| { view.zoom = (view.zoom + 1).min(6); view.save_settings(); cx.notify(); }))
-            .on_action(cx.listener(|view, _: &ZoomOut, _, cx| { view.zoom = (view.zoom - 1).max(-2); view.save_settings(); cx.notify(); }))
-            .on_action(cx.listener(|view, _: &ResetZoom, _, cx| { view.zoom = 0; view.save_settings(); cx.notify(); }))
-            .font_family(theme::FONT_FAMILY).flex().flex_col().size_full().bg(colors.background).text_color(colors.text)
-            .text_size(px(metrics.text))
-            .child(div().flex().items_center().justify_between().pl(px(metrics.traffic_lights_inset)).pr_3().py_2().h(px(metrics.header)).flex_shrink_0()
-                .border_b_1().border_color(colors.border)
-                .child(div().flex().items_center().gap_3().child(img(self.ghost.as_ref().expect("ghost image").clone()).size(px(metrics.ghost)).flex_shrink_0()).child("Local Haunt").child(filters))
-                .child(div().flex().items_center().gap_2()
-                  .child(div().id("settings").px_2().py_1().rounded_sm().cursor_pointer().text_color(colors.secondary)
-                    .on_click(cx.listener(|view, _, _, cx| { view.settings_open = !view.settings_open; cx.notify(); })).child("Settings"))
-                  .child(div().id("auto-refresh").px_2().py_1().rounded_sm().cursor_pointer()
-                    .text_color(if self.auto_refresh { colors.accent } else { colors.secondary })
-                    .on_click(cx.listener(|view, _, _, cx| { view.auto_refresh = !view.auto_refresh; view.save_settings(); if view.auto_refresh { view.refresh(cx); } cx.notify(); }))
-                    .child(if self.auto_refresh { "Auto ✓" } else { "Auto" }))
-                  .child(div().id("refresh").px_2().py_1().rounded_sm().cursor_pointer()
-                    .text_color(colors.secondary).hover(|s| s.bg(colors.button_hover))
-                    .on_click(cx.listener(|view, _, _, cx| view.refresh(cx)))
-                    .flex().items_center().gap_2()
-                    .child(div().w(px(6.0)).h(px(6.0)).flex_shrink_0().rounded_full()
-                        .bg(colors.accent).opacity(if self.scanning { 1.0 } else { 0.0 }))
-                    .child("Refresh"))))
-            .child(div().flex().items_center().gap_2().px_3().h(px(metrics.column_header)).flex_shrink_0()
-                .border_b_1().border_color(colors.border).text_size(px(metrics.small)).text_color(colors.muted)
-                .child(div().w(px(metrics.disclosure)).flex_shrink_0())
-                .child(div().flex_1().min_w_0().child("Name"))
-                .child(cell("Port", metrics.port)).child(cell("Process", metrics.process)).child(cell("PID", metrics.pid))
-                .child(div().w(px(metrics.actions)).flex_shrink_0().child("Actions")))
-            .child(list)
-            .child(div().px_3().py_2().border_t_1().border_color(colors.border)
-                .text_size(px(metrics.caption)).text_color(colors.muted)
-                .child(format!("{project_count} projects · {endpoint_count} endpoints · Cmd/Ctrl +/− zoom · Auto checks every {}s while active", theme::REFRESH_INTERVAL.as_secs())));
+        let mut root = div()
+            .key_context("PortList")
+            .track_focus(self.focus.as_ref().expect("view focus"))
+            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| {
+                view.zoom = (view.zoom + 1).min(6);
+                view.save_settings();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &ZoomOut, _, cx| {
+                view.zoom = (view.zoom - 1).max(-2);
+                view.save_settings();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &ResetZoom, _, cx| {
+                view.zoom = 0;
+                view.save_settings();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &FocusSearch, window, cx| {
+                view.settings_open = false;
+                if let Some(search) = &view.search {
+                    search.update(cx, |search, cx| search.focus(window, cx));
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &OpenSettings, _, cx| {
+                view.settings_open = true;
+                view.confirmation = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &BackToPorts, _, cx| {
+                view.settings_open = false;
+                view.confirmation = None;
+                cx.notify();
+            }))
+            .font_family(theme::FONT_FAMILY)
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(colors.background)
+            .text_color(colors.text)
+            .text_size(px(metrics.text));
         if self.settings_open {
-            let mut panel = div()
-                .px_3()
-                .py_2()
-                .bg(colors.surface)
-                .flex()
-                .flex_col()
-                .gap_2()
-                .flex_shrink_0()
+            root = root.child(self.settings_view(cx));
+        } else {
+            root = root
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child("Project folders")
+                        .pl(px(metrics.traffic_lights_inset))
+                        .pr_3()
+                        .py_2()
+                        .h(px(metrics.header))
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(colors.border)
                         .child(
                             div()
-                                .id("add-folders")
-                                .cursor_pointer()
-                                .text_color(colors.accent)
-                                .on_click(cx.listener(|view, _, _, cx| view.add_folders(cx)))
-                                .child("Add folders…"),
-                        ),
-                );
-            if self.project_roots.is_empty() {
-                panel = panel.child(
-                    div()
-                        .text_color(colors.secondary)
-                        .child("Add folders where you keep development projects."),
-                );
-            }
-            for (index, root) in self.project_roots.iter().enumerate() {
-                let path = root.clone();
-                panel = panel.child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(root.display().to_string()),
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    img(self.ghost.as_ref().expect("ghost image").clone())
+                                        .size(px(metrics.ghost))
+                                        .flex_shrink_0(),
+                                )
+                                .child("Local Haunt"),
                         )
                         .child(
                             div()
-                                .id(("remove-root", index))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("refresh")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .text_color(colors.secondary)
+                                        .hover(|s| s.bg(colors.button_hover))
+                                        .on_click(cx.listener(|view, _, _, cx| view.refresh(cx)))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(6.0))
+                                                .h(px(6.0))
+                                                .flex_shrink_0()
+                                                .rounded_full()
+                                                .bg(colors.accent)
+                                                .opacity(if self.scanning { 1.0 } else { 0.0 }),
+                                        )
+                                        .child("Refresh"),
+                                )
+                                .child(
+                                    div()
+                                        .id("settings")
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .text_color(colors.secondary)
+                                        .hover(|s| {
+                                            s.bg(colors.button_hover).text_color(colors.text)
+                                        })
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.settings_open = true;
+                                            view.confirmation = None;
+                                            cx.notify();
+                                        }))
+                                        .child("Settings…"),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .child(filters)
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .w(px(280.0 + f32::from(self.zoom) * 8.0))
+                                .min_w_0()
+                                .child(
+                                    Input::new(self.search.as_ref().expect("search input"))
+                                        .id("port-search")
+                                        .small()
+                                        .cleanable(true)
+                                        .bg(colors.surface)
+                                        .border_color(colors.border)
+                                        .text_size(px(metrics.small)),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .h(px(metrics.column_header))
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .text_size(px(metrics.small))
+                        .text_color(colors.muted)
+                        .child(div().w(px(metrics.disclosure)).flex_shrink_0())
+                        .child(div().flex_1().min_w_0().child("Name"))
+                        .child(cell("Port", metrics.port))
+                        .child(cell("Process", metrics.process))
+                        .child(cell("PID", metrics.pid))
+                        .child(
+                            div()
+                                .w(px(metrics.actions))
+                                .flex_shrink_0()
+                                .child("Actions"),
+                        ),
+                )
+                .child(list)
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .flex_shrink_0()
+                        .border_t_1()
+                        .border_color(colors.border)
+                        .text_size(px(metrics.caption))
+                        .text_color(colors.muted)
+                        .child(div().flex_1().child(format!(
+                            "{project_count} projects · {endpoint_count} endpoints · Auto {}",
+                            if self.auto_refresh { "on" } else { "off" }
+                        )))
+                        .child(
+                            div()
+                                .id("about-version")
                                 .cursor_pointer()
-                                .text_color(colors.secondary)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.project_roots.retain(|root| root != &path);
-                                    view.save_settings();
-                                    view.refresh(cx);
-                                    cx.notify();
-                                }))
-                                .child("Remove"),
+                                .hover(|s| s.text_color(colors.text))
+                                .on_click(|_, _, cx| cx.dispatch_action(&crate::About))
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                         ),
                 );
-            }
-            root = root.child(panel);
         }
         if let Some(error) = &self.control_error {
             root = root.child(
@@ -916,9 +1242,39 @@ impl Render for PortList {
 
 #[cfg(test)]
 mod tests {
-    use super::{PortList, grouped, has_children};
+    use super::{BackToPorts, OpenSettings, PortList, filtered_groups, grouped, has_children};
     use crate::ports::{Category, Group, Listener};
     use gpui_kit::{AppContext, TestAppContext};
+    #[gpui_kit::test]
+    fn settings_navigation_preserves_the_port_view(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::show_ports);
+        cx.run_until_parked();
+        let handle = cx.update(|cx| cx.windows()[0]);
+        let window = handle.downcast::<PortList>().unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.search
+                    .as_ref()
+                    .unwrap()
+                    .update(cx, |input, cx| input.set_value("3000", window, cx));
+                view.expanded_rows.insert("retained".into());
+            })
+            .unwrap();
+        cx.dispatch_action(handle, OpenSettings);
+        window
+            .update(cx, |view, _, _| assert!(view.settings_open))
+            .unwrap();
+        cx.dispatch_action(handle, BackToPorts);
+        window
+            .update(cx, |view, _, cx| {
+                assert_eq!(view.search.as_ref().unwrap().read(cx).value(), "3000");
+                assert!(!view.settings_open);
+                assert!(view.expanded_rows.contains("retained"));
+            })
+            .unwrap();
+    }
+
     #[gpui_kit::test]
     fn exited_rows_are_retained_briefly_then_removed(cx: &mut TestAppContext) {
         let entity = cx.new(|_| PortList::default());
@@ -954,6 +1310,49 @@ mod tests {
             view.apply_scan(vec![row], cx);
             assert!(view.added.contains(&(10, 1234)));
         });
+    }
+
+    #[test]
+    fn search_keeps_endpoint_workers_and_respects_project_filter() {
+        let row = Listener {
+            port: 3000,
+            pid: 42,
+            identity: None,
+            process: "node".into(),
+            addresses: vec![],
+            directory: None,
+            project: Some("My Site".into()),
+            executable: None,
+            group: Group {
+                category: Category::Projects,
+                key: "/site".into(),
+                label: "My Site".into(),
+            },
+        };
+        let mut worker = row.clone();
+        worker.pid = 43;
+        let mut other = row.clone();
+        other.port = 8080;
+        other.pid = 99;
+        other.process = "python".into();
+        other.project = None;
+        other.group = Group::default();
+        let rows = [row, worker, other];
+        for query in ["42", " :3000 ", "NODE", "my site"] {
+            let groups = filtered_groups(&rows, query, false);
+            assert_eq!(groups.len(), 1);
+            let endpoints = groups.values().next().unwrap();
+            assert_eq!(endpoints.len(), 1);
+            assert_eq!(
+                endpoints[0].rows.len(),
+                2,
+                "A PID search must retain all endpoint workers"
+            );
+        }
+        assert_eq!(filtered_groups(&rows, "  ", false).len(), 2);
+        assert_eq!(filtered_groups(&rows, "", true).len(), 1);
+        assert!(filtered_groups(&rows, "python", true).is_empty());
+        assert!(filtered_groups(&rows, "missing", false).is_empty());
     }
 
     #[test]

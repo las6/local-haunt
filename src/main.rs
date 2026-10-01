@@ -12,7 +12,7 @@ mod ports;
 use port_list::PortList;
 
 // Actions are named commands that our native menu can dispatch.
-actions!(local_haunt, [OpenPorts, Quit]);
+actions!(local_haunt, [OpenPorts, About, Quit]);
 
 // Keeping the handle here keeps the native menu bar item alive.
 struct MenuBar(Tray);
@@ -21,7 +21,12 @@ impl Global for MenuBar {}
 fn main() {
     // A packaging operation, handled before GPUI starts or a tray item is created.
     let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() == Some(std::ffi::OsStr::new("--export-iconset")) {
+    let argument = arguments.next();
+    if argument.as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if argument.as_deref() == Some(std::ffi::OsStr::new("--export-iconset")) {
         let Some(directory) = arguments.next() else {
             eprintln!("--export-iconset requires an output directory");
             std::process::exit(2);
@@ -47,11 +52,15 @@ fn main() {
             }
         })
         .detach();
-        cx.on_action(open_ports).on_action(quit);
+        cx.on_action(open_ports).on_action(about).on_action(quit);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus(vec![
-            Menu::new("Local Haunt").items([MenuItem::action("Quit Local Haunt", Quit)]),
-        ]);
+        cx.set_menus(vec![Menu::new("Local Haunt").items([
+            MenuItem::action("About Local Haunt", About),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", port_list::OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Local Haunt", Quit),
+        ])]);
 
         let image = theme::ghost_image();
         let icon = Icon::from_gpui(&image, cx).expect("Failed to load the menu bar icon");
@@ -62,6 +71,7 @@ fn main() {
             .menu(|_| {
                 vec![
                     MenuItem::action("Open Local Haunt", OpenPorts),
+                    MenuItem::action("About Local Haunt", About),
                     MenuItem::separator(),
                     MenuItem::action("Quit Local Haunt", Quit),
                 ]
@@ -96,6 +106,7 @@ fn show_ports(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
+            window_background: WindowBackgroundAppearance::Blurred,
             titlebar: Some(TitlebarOptions {
                 title: Some("Local Haunt".into()),
                 appears_transparent: true,
@@ -109,6 +120,14 @@ fn show_ports(cx: &mut App) {
     println!("Opened the port window.");
 }
 
+fn about(_: &About, cx: &mut App) {
+    cx.defer(|cx| {
+        // About is an AppKit panel, independent of the GPUI port window.
+        cx.activate(true);
+        macos::show_about();
+    });
+}
+
 fn quit(_: &Quit, cx: &mut App) {
     let tray = cx.global::<MenuBar>().0.clone();
     if let Err(error) = tray.close(cx) {
@@ -119,11 +138,30 @@ fn quit(_: &Quit, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenPorts, open_ports, show_ports};
+    use super::{About, OpenPorts, about, open_ports, show_ports};
     use gpui_kit::TestAppContext;
 
     #[gpui_kit::test]
+    fn about_does_not_create_or_replace_the_port_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| about(&About, cx));
+        cx.run_until_parked();
+        cx.update(|cx| assert!(cx.windows().is_empty()));
+        cx.update(show_ports);
+        let original = cx.update(|cx| cx.windows()[0]);
+        cx.update(|cx| {
+            original.update(cx, |_, _, cx| about(&About, cx)).unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            assert_eq!(cx.windows()[0].window_id(), original.window_id());
+        });
+    }
+
+    #[gpui_kit::test]
     fn opening_from_an_active_window_reuses_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
         cx.update(show_ports);
         let original = cx.update(|cx| cx.windows()[0]);
 

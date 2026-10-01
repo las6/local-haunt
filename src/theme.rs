@@ -5,6 +5,10 @@ use std::time::Duration;
 // Change this one value to recolor links, selection, indicators, and detail borders.
 // pub const ACCENT: u32 = 0x7259db;
 pub const ACCENT: u32 = 0xf7920c;
+// Dark tint over the native macOS blur; lower values reveal more of the backdrop.
+pub const WINDOW_TINT_OPACITY: f32 = 0.75;
+// Extra tint for controls and panels over the window; keeps text and icons fully opaque.
+pub const ELEMENT_TINT_OPACITY: f32 = 0.35;
 pub const FONT_FAMILY: &str = ".SystemUIFont";
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 pub const ROW_TRANSITION: Duration = Duration::from_millis(850);
@@ -14,6 +18,8 @@ pub const TRANSITION_RETENTION: Duration = Duration::from_millis(900);
 pub struct Palette {
     pub background: Hsla,
     pub surface: Hsla,
+    pub row_background: Hsla,
+    pub row_alternate: Hsla,
     pub row_hover: Hsla,
     pub button_hover: Hsla,
     pub text: Hsla,
@@ -29,19 +35,26 @@ pub struct Palette {
 pub fn palette() -> Palette {
     let accent = rgb(ACCENT).blend(rgb(0xffffff).alpha(0.45)).into();
     Palette {
-        background: rgb(0x20242b).into(),
-        surface: rgb(0x252a32).into(),
-        row_hover: rgb(0x333947).into(),
-        button_hover: rgb(0x444b59).into(),
+        background: rgb(0x20242b).alpha(WINDOW_TINT_OPACITY).into(),
+        surface: rgb(0x252a32).alpha(ELEMENT_TINT_OPACITY).into(),
+        // Let alternate rows show the root tint without applying it twice.
+        row_background: rgb(0x20242b).alpha(0.0).into(),
+        // A light overlay keeps striping subtle without obscuring the blurred backdrop.
+        row_alternate: rgb(0xffffff).alpha(0.035).into(),
+        row_hover: rgb(0xffffff).alpha(0.08).into(),
+        button_hover: rgb(0x444b59).alpha(ELEMENT_TINT_OPACITY).into(),
         text: rgb(0xdce0e7).into(),
         secondary: rgb(0xaab1bd).into(),
         muted: rgb(0x8b93a2).into(),
         border: rgb(0x343a45).into(),
         accent,
-        selected: rgb(0x20242b).blend(rgb(ACCENT).alpha(0.16)).into(),
+        selected: rgb(0x20242b)
+            .blend(rgb(ACCENT).alpha(0.16))
+            .alpha(ELEMENT_TINT_OPACITY)
+            .into(),
         danger: rgb(0xe8a0a0).into(),
         error: rgb(0xffaaaa).into(),
-        danger_surface: rgb(0x3b2c34).into(),
+        danger_surface: rgb(0x3b2c34).alpha(ELEMENT_TINT_OPACITY).into(),
     }
 }
 

@@ -27,11 +27,18 @@ iconset="$project_root/target/app/$profile/local-haunt.iconset"
 "target/$profile/local-haunt" --export-iconset "$iconset"
 /usr/bin/iconutil --convert icns --output "$app_bundle/Contents/Resources/local-haunt.icns" "$iconset"
 cp assets/Info.plist "$app_bundle/Contents/Info.plist"
+cp assets/Credits.html "$app_bundle/Contents/Resources/Credits.html"
+# Cargo is the source of truth for the version shown by the native About panel.
+app_version=$("target/$profile/local-haunt" --version)
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$app_bundle/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_version" "$app_bundle/Contents/Info.plist"
 # Local ad-hoc signing needs no paid developer account.
 codesign --force --sign - "$app_bundle"
 printf 'Built: %s\n' "$app_bundle"
 
 if [[ "$run_app" == true ]]; then
+    # Replace only instances launched from this exact project/profile bundle.
+    bash "$project_root/scripts/stop-instance.sh" "$app_bundle/Contents/MacOS/local-haunt"
     # Keep the app attached to Zed's task terminal so stopping the task stops it.
     exec "$app_bundle/Contents/MacOS/local-haunt"
 fi
