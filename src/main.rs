@@ -1,32 +1,37 @@
 use gpui_kit::*;
 use gpui_tray::{Icon, Tray};
 
+mod icon_export;
 mod macos;
+mod theme;
 
-// This view has no state yet; it only describes what to draw.
-struct Greeting;
+mod port_list;
+mod ports;
 
-impl Render for Greeting {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .bg(rgb(0x20242b))
-            .text_color(rgb(0xffffff))
-            .child("Hello from Local Haunt!")
-    }
-}
+use port_list::PortList;
 
 // Actions are named commands that our native menu can dispatch.
-actions!(local_haunt, [OpenGreeting, Quit]);
+actions!(local_haunt, [OpenPorts, Quit]);
 
 // Keeping the handle here keeps the native menu bar item alive.
 struct MenuBar(Tray);
 impl Global for MenuBar {}
 
 fn main() {
+    // A packaging operation, handled before GPUI starts or a tray item is created.
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() == Some(std::ffi::OsStr::new("--export-iconset")) {
+        let Some(directory) = arguments.next() else {
+            eprintln!("--export-iconset requires an output directory");
+            std::process::exit(2);
+        };
+        if let Err(error) = icon_export::export_iconset(std::path::Path::new(&directory)) {
+            eprintln!("Could not export the app icon: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     application().with_quit_mode(QuitMode::Explicit).run(|cx| {
         init(cx);
         macos::set_window_presence(false);
@@ -41,16 +46,13 @@ fn main() {
             }
         })
         .detach();
-        cx.on_action(open_greeting).on_action(quit);
+        cx.on_action(open_ports).on_action(quit);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![
             Menu::new("Local Haunt").items([MenuItem::action("Quit Local Haunt", Quit)]),
         ]);
 
-        let image = Image::from_bytes(
-            ImageFormat::Svg,
-            include_bytes!("../assets/ghost.svg").to_vec(),
-        );
+        let image = theme::ghost_image();
         let icon = Icon::from_gpui(&image, cx).expect("Failed to load the menu bar icon");
 
         let tray = Tray::builder()
@@ -58,7 +60,7 @@ fn main() {
             .tooltip("Local Haunt")
             .menu(|_| {
                 vec![
-                    MenuItem::action("Open Local Haunt", OpenGreeting),
+                    MenuItem::action("Open Local Haunt", OpenPorts),
                     MenuItem::separator(),
                     MenuItem::action("Quit Local Haunt", Quit),
                 ]
@@ -71,25 +73,25 @@ fn main() {
     });
 }
 
-fn open_greeting(_: &OpenGreeting, cx: &mut App) {
+fn open_ports(_: &OpenPorts, cx: &mut App) {
     // A menu action can run while its active window is already being updated.
     // Wait until action dispatch releases that window before touching it.
-    cx.defer(show_greeting);
+    cx.defer(show_ports);
 }
 
-fn show_greeting(cx: &mut App) {
+fn show_ports(cx: &mut App) {
     macos::set_window_presence(true);
     cx.activate(true);
 
-    // Reuse the existing greeting window instead of opening another one.
+    // Reuse the existing port window instead of opening another one.
     if let Some(window) = cx.windows().first().copied() {
         if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
-            eprintln!("Failed to activate the greeting window: {error}");
+            eprintln!("Failed to activate the port window: {error}");
         }
         return;
     }
 
-    let window_bounds = WindowBounds::centered(size(px(480.0), px(320.0)), cx);
+    let window_bounds = WindowBounds::centered(size(px(780.0), px(520.0)), cx);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(window_bounds),
@@ -100,10 +102,10 @@ fn show_greeting(cx: &mut App) {
             }),
             ..Default::default()
         },
-        |_, cx| cx.new(|_| Greeting),
+        |window, cx| cx.new(|cx| PortList::new(window, cx)),
     )
     .expect("Failed to open the Local Haunt window");
-    println!("Opened the greeting window.");
+    println!("Opened the port window.");
 }
 
 fn quit(_: &Quit, cx: &mut App) {
@@ -116,18 +118,18 @@ fn quit(_: &Quit, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenGreeting, open_greeting, show_greeting};
+    use super::{OpenPorts, open_ports, show_ports};
     use gpui_kit::TestAppContext;
 
     #[gpui_kit::test]
     fn opening_from_an_active_window_reuses_it(cx: &mut TestAppContext) {
-        cx.update(show_greeting);
+        cx.update(show_ports);
         let original = cx.update(|cx| cx.windows()[0]);
 
         // Reproduce menu action dispatch while the window is on GPUI's stack.
         cx.update(|cx| {
             original
-                .update(cx, |_, _, cx| open_greeting(&OpenGreeting, cx))
+                .update(cx, |_, _, cx| open_ports(&OpenPorts, cx))
                 .unwrap();
         });
         cx.run_until_parked();
@@ -142,7 +144,7 @@ mod tests {
                 .unwrap();
         });
         cx.update(|cx| assert!(cx.windows().is_empty()));
-        cx.update(|cx| open_greeting(&OpenGreeting, cx));
+        cx.update(|cx| open_ports(&OpenPorts, cx));
         cx.run_until_parked();
         cx.update(|cx| assert_eq!(cx.windows().len(), 1));
     }

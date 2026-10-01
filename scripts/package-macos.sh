@@ -22,7 +22,10 @@ fi
 app_bundle="$project_root/target/app/$profile/Local Haunt.app"
 mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
 cp "target/$profile/local-haunt" "$app_bundle/Contents/MacOS/local-haunt"
-cp assets/local-haunt.icns "$app_bundle/Contents/Resources/local-haunt.icns"
+# Use the compiled theme and the same SVG renderer as GPUI for every icon size.
+iconset="$project_root/target/app/$profile/local-haunt.iconset"
+"target/$profile/local-haunt" --export-iconset "$iconset"
+/usr/bin/iconutil --convert icns --output "$app_bundle/Contents/Resources/local-haunt.icns" "$iconset"
 cp assets/Info.plist "$app_bundle/Contents/Info.plist"
 # Local ad-hoc signing needs no paid developer account.
 codesign --force --sign - "$app_bundle"
