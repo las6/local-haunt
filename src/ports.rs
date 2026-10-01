@@ -41,7 +41,7 @@ impl Default for Group {
 }
 
 // This function does blocking OS and filesystem work; call it on a background thread.
-pub fn scan() -> Result<Vec<Listener>, String> {
+pub fn scan(project_roots: &[PathBuf]) -> Result<Vec<Listener>, String> {
     let output = Command::new("/usr/sbin/lsof")
         .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-F0pcn"])
         .output()
@@ -86,7 +86,7 @@ pub fn scan() -> Result<Vec<Listener>, String> {
             listener.executable = info.executable.clone();
         }
         listener.project = listener.directory.as_deref().and_then(project_name);
-        listener.group = classify(listener, &home);
+        listener.group = classify(listener, &home, project_roots);
     }
     Ok(listeners)
 }
@@ -249,7 +249,7 @@ fn parse_metadata(output: &str) -> BTreeMap<u32, ProcessMetadata> {
     metadata
 }
 
-fn classify(listener: &Listener, home: &Path) -> Group {
+fn classify(listener: &Listener, home: &Path, project_roots: &[PathBuf]) -> Group {
     let paths = [
         listener.directory.as_deref(),
         listener.executable.as_deref(),
@@ -267,16 +267,12 @@ fn classify(listener: &Listener, home: &Path) -> Group {
         };
     }
     if let Some(directory) = &listener.directory {
-        for folder in [
-            "Personal",
-            "Freelance",
-            "Satumaa",
-            "Documents/ChatGPT",
-            "ChatGPT",
-        ] {
-            let root = home.join(folder);
-            if directory.starts_with(&root) {
-                let project_root = find_project_root(directory, &root);
+        // Prefer the most specific configured root when roots overlap.
+        let mut roots = project_roots.iter().collect::<Vec<_>>();
+        roots.sort_by_key(|root| std::cmp::Reverse(root.components().count()));
+        for root in roots {
+            if directory.starts_with(root) {
+                let project_root = find_project_root(directory, root);
                 return Group {
                     category: Category::Projects,
                     key: project_root.display().to_string(),
@@ -404,26 +400,62 @@ mod tests {
     fn classifies_by_path_without_guessing_from_process_name() {
         let home = std::path::Path::new("/Users/me");
         let mut row = parse_listeners("p12\0cnginx\0n*:80\0").remove(0);
-        assert_eq!(classify(&row, home).category, Category::Unknown);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Unknown
+        );
         row.executable =
             Some(home.join("Library/Application Support/Local/lightning-services/nginx/bin/nginx"));
-        assert_eq!(classify(&row, home).label, "Local");
-        assert_eq!(classify(&row, home).category, Category::Apps);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).label,
+            "Local"
+        );
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Apps
+        );
         row.executable = None;
         row.directory = Some(home.join("Personal/site/src"));
-        assert_eq!(classify(&row, home).category, Category::Projects);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Projects
+        );
         row.directory = Some(home.join("Personal-other/site"));
-        assert_eq!(classify(&row, home).category, Category::Unknown);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Unknown
+        );
         row.directory = None;
         row.executable = Some("/Applications/Logi Options+.app/Contents/MacOS/agent".into());
-        assert_eq!(classify(&row, home).label, "Logi Options+");
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).label,
+            "Logi Options+"
+        );
         row.executable = Some("/Applications/Discord.app/Contents/Frameworks/Discord Helper.app/Contents/MacOS/Helper".into());
-        assert_eq!(classify(&row, home).label, "Discord");
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).label,
+            "Discord"
+        );
         row.executable = None;
         row.directory = Some(home.join("Personal/no-manifest/one"));
-        let first = classify(&row, home);
+        let first = classify(&row, home, &[home.join("Personal")]);
         row.directory = Some(home.join("Personal/no-manifest/two"));
-        assert_eq!(first, classify(&row, home));
+        assert_eq!(first, classify(&row, home, &[home.join("Personal")]));
+    }
+
+    #[test]
+    fn project_folders_are_configurable_and_most_specific_match_wins() {
+        let home = std::path::Path::new("/Users/me");
+        let mut row = parse_listeners("p12\0cnode\0n*:3000\0").remove(0);
+        row.directory = Some("/work/client/site/src".into());
+        assert_eq!(classify(&row, home, &[]).category, Category::Unknown);
+        let group = classify(&row, home, &["/work".into(), "/work/client".into()]);
+        assert_eq!(group.category, Category::Projects);
+        assert_eq!(group.key, "/work/client/site");
+        assert_eq!(
+            classify(&row, home, &["/work/cli".into()]).category,
+            Category::Unknown
+        );
     }
 
     #[test]
@@ -431,13 +463,25 @@ mod tests {
         let home = std::path::Path::new("/Users/me");
         let mut row = parse_listeners("p12\0cBrowserStackLocalApp\0n*:4567\0").remove(0);
         row.executable = Some(home.join(".browserstack/BrowserStackLocalApp"));
-        assert_eq!(classify(&row, home).label, "BrowserStack");
-        assert_eq!(classify(&row, home).category, Category::Apps);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).label,
+            "BrowserStack"
+        );
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Apps
+        );
         row.process = "siriactionsd".into();
         row.executable = Some("/Library/Developer/CoreSimulator/Volumes/iOS/runtime.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/VoiceShortcuts.framework/Support/siriactionsd".into());
-        assert_eq!(classify(&row, home).category, Category::Apps);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Apps
+        );
         row.executable = Some("/tmp/siriactionsd".into());
-        assert_eq!(classify(&row, home).category, Category::Unknown);
+        assert_eq!(
+            classify(&row, home, &[home.join("Personal")]).category,
+            Category::Unknown
+        );
     }
 
     #[test]
@@ -484,7 +528,7 @@ mod tests {
     fn detects_a_real_listening_socket() {
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = socket.local_addr().unwrap().port();
-        let rows = super::scan().unwrap();
+        let rows = super::scan(&[]).unwrap();
         let row = rows
             .iter()
             .find(|row| row.port == port && row.pid == std::process::id());

@@ -1,4 +1,5 @@
 use crate::ports::{self, Category, Group, Listener};
+use crate::settings::Settings;
 use crate::theme::{self, Metrics};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -44,12 +45,18 @@ fn grouped(listeners: &[Listener]) -> BTreeMap<Group, Vec<Endpoint<'_>>> {
 pub struct PortList {
     listeners: Vec<Listener>,
     scanning: bool,
+    refresh_pending: bool,
     error: Option<String>,
     control_error: Option<String>,
     scan_task: Option<Task<()>>,
     expanded_groups: BTreeSet<String>,
     expanded_rows: BTreeSet<String>,
     projects_only: bool,
+    project_roots: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    settings_valid: bool,
+    settings_open: bool,
+    folder_task: Option<Task<()>>,
     auto_refresh: bool,
     active: bool,
     zoom: i8,
@@ -85,11 +92,29 @@ impl PortList {
         #[allow(unused_mut)]
         let mut view = Self {
             auto_refresh: true,
+            settings_valid: true,
             active: window.is_window_active(),
             focus: Some(focus),
             ghost: Some(theme::ghost_image()),
             ..Self::default()
         };
+        #[cfg(not(test))]
+        {
+            view.settings_path = crate::settings::path();
+            if let Some(path) = &view.settings_path {
+                match Settings::load(path) {
+                    Ok(settings) => {
+                        view.project_roots = settings.project_roots;
+                        view.zoom = settings.zoom;
+                        view.auto_refresh = settings.auto_refresh;
+                    }
+                    Err(error) => {
+                        view.control_error = Some(error);
+                        view.settings_valid = false;
+                    }
+                }
+            }
+        }
         cx.observe_window_activation(window, |view, window, cx| {
             view.active = window.is_window_active();
             if view.active && view.auto_refresh {
@@ -119,6 +144,56 @@ impl PortList {
             }));
         }
         view
+    }
+
+    fn save_settings(&mut self) {
+        // Preserve malformed files for repair rather than silently overwriting them.
+        if !self.settings_valid {
+            return;
+        }
+        if let Some(path) = &self.settings_path {
+            let settings = Settings {
+                project_roots: self.project_roots.clone(),
+                zoom: self.zoom,
+                auto_refresh: self.auto_refresh,
+            };
+            if let Err(error) = settings.save(path) {
+                self.control_error = Some(error);
+            }
+        }
+    }
+
+    fn add_folders(&mut self, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Choose project folders".into()),
+        });
+        self.folder_task = Some(cx.spawn(async move |view, cx| {
+            let result = prompt.await;
+            let _ = view.update(cx, |view, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        for path in paths {
+                            if !view.project_roots.contains(&path) {
+                                view.project_roots.push(path);
+                            }
+                        }
+                        view.save_settings();
+                        view.refresh(cx);
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        view.control_error = Some(format!("Could not choose folders: {error}"))
+                    }
+                    Err(error) => {
+                        view.control_error = Some(format!("Folder picker closed: {error}"))
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn apply_scan(&mut self, mut next: Vec<Listener>, cx: &mut Context<Self>) {
@@ -195,12 +270,14 @@ impl PortList {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.scanning {
+            self.refresh_pending = true;
             return;
         }
         self.scanning = true;
         self.error = None;
         cx.notify();
-        let scan = cx.background_spawn(async { ports::scan() });
+        let roots = self.project_roots.clone();
+        let scan = cx.background_spawn(async move { ports::scan(&roots) });
         self.scan_task = Some(cx.spawn(async move |view, cx| {
             let result = scan.await;
             let _ = view.update(cx, |view, cx| {
@@ -208,6 +285,10 @@ impl PortList {
                 match result {
                     Ok(listeners) => view.apply_scan(listeners, cx),
                     Err(error) => view.error = Some(error),
+                }
+                if view.refresh_pending {
+                    view.refresh_pending = false;
+                    view.refresh(cx);
                 }
                 cx.notify();
             });
@@ -668,18 +749,20 @@ impl Render for PortList {
             );
         }
         let mut root = div().key_context("PortList").track_focus(self.focus.as_ref().expect("view focus"))
-            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| { view.zoom = (view.zoom + 1).min(6); cx.notify(); }))
-            .on_action(cx.listener(|view, _: &ZoomOut, _, cx| { view.zoom = (view.zoom - 1).max(-2); cx.notify(); }))
-            .on_action(cx.listener(|view, _: &ResetZoom, _, cx| { view.zoom = 0; cx.notify(); }))
+            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| { view.zoom = (view.zoom + 1).min(6); view.save_settings(); cx.notify(); }))
+            .on_action(cx.listener(|view, _: &ZoomOut, _, cx| { view.zoom = (view.zoom - 1).max(-2); view.save_settings(); cx.notify(); }))
+            .on_action(cx.listener(|view, _: &ResetZoom, _, cx| { view.zoom = 0; view.save_settings(); cx.notify(); }))
             .font_family(theme::FONT_FAMILY).flex().flex_col().size_full().bg(colors.background).text_color(colors.text)
             .text_size(px(metrics.text))
             .child(div().flex().items_center().justify_between().pl(px(metrics.traffic_lights_inset)).pr_3().py_2().h(px(metrics.header)).flex_shrink_0()
                 .border_b_1().border_color(colors.border)
                 .child(div().flex().items_center().gap_3().child(img(self.ghost.as_ref().expect("ghost image").clone()).size(px(metrics.ghost)).flex_shrink_0()).child("Local Haunt").child(filters))
                 .child(div().flex().items_center().gap_2()
+                  .child(div().id("settings").px_2().py_1().rounded_sm().cursor_pointer().text_color(colors.secondary)
+                    .on_click(cx.listener(|view, _, _, cx| { view.settings_open = !view.settings_open; cx.notify(); })).child("Settings"))
                   .child(div().id("auto-refresh").px_2().py_1().rounded_sm().cursor_pointer()
                     .text_color(if self.auto_refresh { colors.accent } else { colors.secondary })
-                    .on_click(cx.listener(|view, _, _, cx| { view.auto_refresh = !view.auto_refresh; if view.auto_refresh { view.refresh(cx); } cx.notify(); }))
+                    .on_click(cx.listener(|view, _, _, cx| { view.auto_refresh = !view.auto_refresh; view.save_settings(); if view.auto_refresh { view.refresh(cx); } cx.notify(); }))
                     .child(if self.auto_refresh { "Auto ✓" } else { "Auto" }))
                   .child(div().id("refresh").px_2().py_1().rounded_sm().cursor_pointer()
                     .text_color(colors.secondary).hover(|s| s.bg(colors.button_hover))
@@ -698,6 +781,67 @@ impl Render for PortList {
             .child(div().px_3().py_2().border_t_1().border_color(colors.border)
                 .text_size(px(metrics.caption)).text_color(colors.muted)
                 .child(format!("{project_count} projects · {endpoint_count} endpoints · Cmd/Ctrl +/− zoom · Auto checks every {}s while active", theme::REFRESH_INTERVAL.as_secs())));
+        if self.settings_open {
+            let mut panel = div()
+                .px_3()
+                .py_2()
+                .bg(colors.surface)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .flex_shrink_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child("Project folders")
+                        .child(
+                            div()
+                                .id("add-folders")
+                                .cursor_pointer()
+                                .text_color(colors.accent)
+                                .on_click(cx.listener(|view, _, _, cx| view.add_folders(cx)))
+                                .child("Add folders…"),
+                        ),
+                );
+            if self.project_roots.is_empty() {
+                panel = panel.child(
+                    div()
+                        .text_color(colors.secondary)
+                        .child("Add folders where you keep development projects."),
+                );
+            }
+            for (index, root) in self.project_roots.iter().enumerate() {
+                let path = root.clone();
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(root.display().to_string()),
+                        )
+                        .child(
+                            div()
+                                .id(("remove-root", index))
+                                .cursor_pointer()
+                                .text_color(colors.secondary)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.project_roots.retain(|root| root != &path);
+                                    view.save_settings();
+                                    view.refresh(cx);
+                                    cx.notify();
+                                }))
+                                .child("Remove"),
+                        ),
+                );
+            }
+            root = root.child(panel);
+        }
         if let Some(error) = &self.control_error {
             root = root.child(
                 div()

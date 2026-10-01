@@ -3,6 +3,7 @@ use gpui_tray::{Icon, Tray};
 
 mod icon_export;
 mod macos;
+mod settings;
 mod theme;
 
 mod port_list;
